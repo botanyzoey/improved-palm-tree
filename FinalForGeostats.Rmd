@@ -1,0 +1,129 @@
+---
+title: "Geostats Final Project"
+author: "Zoey Armstrong"
+date: "12/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("knitr")
+opts_knit$set(root.dir = "C:/Users/Zoey/Documents")
+
+r <- getOption("repos")
+r["CRAN"] <- "http://cran.cnr.berkeley.edu/"
+options(repos = r)
+```
+
+## Introduction
+
+The goal of this R markdown is to run on some spatial statistical tests on a dataset created using the MyCoPortal digital herbarium. To create this data set I took the Lat and Long coordinates from herbarium records of the Pacific Golden Chanterelle (Cantharellus formosus). These points were then cleaned to get rid of any duplicates and Null values, and were then used to extract climate information from the worldclim bioclimactic variables set. These operations resulted in a dataset of 213 observations with 19 bioclimactic variables attached. With that bit of background out of the way, let's get started by loading in the libraries and the data set.
+
+```{r,message=FALSE,error=FALSE, results='hide', warning= FALSE}
+#The libraries, not sure if all of these are necessary
+require("spdep")
+require("tidyverse")
+require("boot")
+require("xlsx")
+require("rJava")
+require("xlsxjars")
+require("biogeo")
+require("expp")
+require("MASS")
+require("spatialreg")
+
+#Getting the data, this should be the only piece you need to read in
+ChantClimWithLatLon <- read.csv("ChantClimWithLatLon.csv")
+```
+
+## Starting the analysis
+
+Right off the bat we're going to reformat the data we just read in so that we can create a neighbors list. It needs to be a dataframe with just two columns: Lat and Lon
+```{r}
+#Formatting the data so we can create a neighbors list
+chantxy <- ChantClimWithLatLon
+chantxy[1:21] <- NULL
+colnames(chantxy)[2] <- "Lat"
+colnames(chantxy)[1] <- "Lon"
+```
+
+Now that we have that, let's create the neighbors list and then append this to the original dataset
+```{r}
+#Making neighbors list, we use style W
+knea <- knearneigh(coordinates(chantxy), longlat = TRUE)
+neib <- knn2nb(knea)
+neighbor <- nb2listw(neib, style = "W")
+
+#We now append this to the original dataset
+ChantClimWithLatLon$neighbor <- as.numeric(neighbor$neighbours)
+```
+
+We did this so we can create a linear regression model that can identify areas of clustering. I'll be using the neighbors list as a proxy for clustering and see which climate variables are best at identifying this.
+```{r}
+#With this we can do a regression to see which climatic variables are best at predicting areas of clustering
+#I will use neighbors as a proxy measuring for clustering
+fit <- lm(formula=  neighbor ~ bio1 + bio2 + bio3 + bio4 + bio5 + bio6 + bio7 + bio8 + bio9 + bio10 + bio11 + bio12 + bio13 + bio14 + bio15 + bio16 + bio17 + bio18 + bio19, data = ChantClimWithLatLon)
+step <- stepAIC(fit, direction="both")
+step$anova
+```
+
+This tells us that the variables bio2, bio12, bio14, bio15, bio16, and bio18 are the best predictors. Knowing this will help us to cut down on the amount of variables we'll be testing later on, as it got unwieldly when including them all. So we are going to create a new dataset which is a subset of the orginal dataset, but only using these new variables. My solution is far from elegant :/
+```{r}
+#Making a dataset with only a subset of "useful" variables
+ChantSubset <- ChantClimWithLatLon
+ChantSubset[1:3] <- NULL
+ChantSubset[2:10] <- NULL
+ChantSubset$bio13 <- NULL
+ChantSubset$bio17 <- NULL
+ChantSubset$bio19 <- NULL
+colnames(ChantSubset)[8] <- "Lat"
+colnames(ChantSubset)[7] <- "Lon"
+```
+
+# Spatial statistical testing
+
+Now we are going to run several spatial tests on autocorrelation. I set it to apply the test to each variable in the subset dataset. We'll start out with the Moran's I test and Moran's plot.
+```{r}
+#Moran's I Test
+biomatrix <- as(ChantSubset, "Matrix")
+func.moran <- function(x){moran.test(x, neighbor)}
+apply(biomatrix, 2, func.moran)
+
+#Moran's I Plot
+func.plot.m <- function(x){moran.plot(x, neighbor, pch = 20)}
+invisible(apply(biomatrix, 2, func.plot.m))
+```
+
+For all of the variables the alternative hypothesis is greater, this means that there is more clustring than you'd expect that by chance. For my purposes knowing this is a good thing, since it let's me know that the climate that the fungi occupies isn't too ubitquitous to create a useful ecological niche model.
+
+I also decided to do a montecarlo simulation for the moran's I test
+```{r}
+#Now to do a Moran's I montecarlo simulation, on the selected variables
+nsim <- 500
+func.moran.mc <- function(x){moran.mc(x, neighbor, nsim)}
+apply(biomatrix, 2, func.moran.mc)
+```
+
+The findings from the base Moran's I holds true when doing the montecarlo simulation. They all have the alternative hypothesis as being more likely.
+
+We do similar stats with geary's C, both the regular geary's and the monte carlo geary's
+```{r}
+#Geary's C Test
+func.geary <- function(x){geary.test(x, neighbor)}
+apply(biomatrix, 2, func.geary)
+
+#Now to do a Geary's C montecarlo simulation, on the selected variables
+nsim <- 500
+func.geary.mc <- function(x){geary.mc(x, neighbor, nsim)}
+apply(biomatrix, 2, func.geary.mc)
+```
+
+When running  the Geary's tests, it results that there is spatial autocorrelation at the local level which makes sense. It also looks like the local autocorrelation provides a bit more of an explanation. This could help to account for the local clustering in forests throughout the state.
+
+## Test of error
+
+To wrap it up I'm going to run a spatial error model on the new equation.
+```{r, warning = FALSE}
+formula <- (neighbor ~ bio2 + bio12 + bio14 + bio15 + bio16 + bio18)
+GMerrorsar(formula, ChantSubset, neighbor)
+```
